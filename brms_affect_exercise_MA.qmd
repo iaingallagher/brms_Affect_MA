@@ -1,0 +1,871 @@
+---
+title: Bayesian Modeling for Meta-analysis of Affect Chnge with Exercise Effort
+author: Iain J Gallagher
+output: html
+editor_options: 
+  chunk_output_type: console
+---
+
+useful:
+
+https://vasishth.github.io/bayescogsci/book/ch-remame.html
+https://mvuorre.github.io/posts/2016-09-29-bayesian-meta-analysis/
+https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/bayesian-ma.html
+https://www.youtube.com/watch?v=0Ej6ojGRz3Q
+https://www.youtube.com/watch?v=0Ej6ojGRz3Q&t=10s
+
+See also baggr: https://cran.r-project.org/web/packages/baggr/vignettes/baggr.html 
+metaStan - https://arxiv.org/pdf/2202.00502.pdf
+
+useful figure: https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/multilevel-ma.html
+
+https://training.cochrane.org/handbook/current/chapter-06#section-6-5-2 - imouting sds for change scores (like we have here... change scores with no variability)
+
+## Introduction
+
+Affective valence, i.e., feelings of pleasure (positive affect) or displeasure (negative affect), can be modified by exercise. A decrease in affective valence during exercise may be associated with low exercise enjoyment, and subsequently lead to reduced uptake of and adherence to exercise routines. Ekkekakis and co-workers have proposed the dual mode model (DMM). The DMM hypothesises a steady or increasing level of pleasure at exercise intensities below the VT, and a decreasing level of pleasure above the VT. Consequently, there has been an increase in studies investigating the effect of exercise on affective valence. Many of these studies have used exercise intensities relative to the VT. This provides an opportunity to meta-analyse the relationship between exercise intensity relative to the VT and the change in core affect in response to exercise. In this document we will carry out the meta-analysis using data provided by Daniel Kinghorn & Niels Vollaard.
+
+The main outcome is the change in affective valence during exercise as assessed using the Feeling Scale developed by Hardy & Rejeski (1989). This scale is commonly used in studies examining the relationship between exercise and affect. 
+
+We will assess the change in affective valence during exercise as: 
+
+1) the change from pre-exercise to the final measurement taken during exercise 
+
+2) as the change from pre-exercise to the greatest change from pre-exercise recorded during exercise. 
+
+These will be analysed separately as meta-regressions. 
+
+We will use Bayesian methods for this study. Although we were originally going to use the RoBMA package for this analysis the outcomes we want to investigate require meta-regression. RoBMA does not have meta-regression functionality. We will instead construct a hierarchical mixed effect linear model using the `brms` package to estimate model coefficients and uncertainty intervals around those coefficients.
+
+### Load libraries and data
+
+First we load the libraries we need and set up our working environment.
+
+```{r}
+#| label: Set up environment
+
+library(esc) # for effect sizes
+library(tidyverse) # data wrangling, plotting
+theme_set(theme_bw()) # plot theme
+library(metafor) # for frequentist results
+library(brms) # bayesian estimation
+library(tidybayes) # 'tidy' results
+library(bayesplot) # convenient plotting
+library(ggridges) # for forest plot
+rm(list = ls()) # start clean
+```
+
+Next we read in the data. I took selected data from the original spreadsheet sent on by Daniel Kinghorn (`data/Meta-analysis data draft five.xlsx`) and saved that in the `csv` file used below.
+
+```{r}
+#| label: Read the data
+
+# load data
+data_in <- read_csv('data/affect_data.csv') # edited simpler dataset
+glimpse(data_in)
+```
+
+Note there is some duplication in the `author`, `n` and `year` columns because some studies are represented more than once (i.e. there are some subgroup analyses within studies). For example the study by Bogdanis assessed affect during exercise using both a treadmill and a cycle ergometer. *Need to clarify if all data points from individual studies are to be used.*
+
+## Data exploration
+
+For the purposes of a first pass analysis it would be useful to reduce the dataset to one outcome per study.
+
+```{r}
+#| label: Exploration
+
+data_in %>% janitor::tabyl(Author, Condition) %>% 
+  janitor::adorn_totals(c('row', 'col'))
+```
+
+### Studies above VT
+
+There are 9 studies with exercise above the VT; one study (Prado) has two of these. These were different phases of the reproductive hormone cycle in females. Prado et al also contribute 2 studies to the below VT total for the same reason. We will remove the luteal phase data for a first pass analysis. We could carry out a sensitivity analysis later by repeating the process with the follicular data rather than the luteal data.
+
+## Studies at VT
+
+8 studies examined exercise at VT. Zenko et al contribute two of these studies. One of these was carried out in males and one in females. In the total dataset there are 457 females and 302 males (although there is some duplication). We'll remove the Zenko female study here to balance these numbers a bit. Again we can carry out sensitivity analysis later by adding the removed females back in and removing the Zenko males. Bird et al contributed 2 studies at VT. These were actually different studies though so we'll keep both in the data.
+
+## Studies below VT
+
+There are 13 studies with data below VT. Prado et al contribute 2 of these as they examined subjects at two different menstrual cycle phases above & below VT. As above we will remove the luteal phase data here and carry out sensitivity analysis later replacing the follicular data with the luteal data. Bogdanis also contributed 2 studies below VT. One of these used a treadmill and one used a cycle ergometer. It seems that cycle ergometer was the most frequently used mode of exercise so we'll remove the Bogdanis treadmill data.
+
+```{r}
+#| label: Data processing
+
+# remove luteal study data
+data_in <- data_in %>% filter(Condition_info != 'Follicular phase' | is.na(Condition_info)) %>%
+  filter(Condition_info != 'Cycle Ergometer' | is.na(Condition_info)) %>%
+  filter(Condition_info != 'Male' | is.na(Condition_info))
+```
+
+The variable we are interested in for this meta-analysis is `affect_greatest_deviation`. This is the greatest change from pre-exercise recorded during exercise (see outcome 2 above). Examining the original file from Daniel Kinghorn it seems that baseline affect was not measured in 3 studies:
+
+* Bird 2016
+* Bird 2021
+* Hutchison 2015
+
+In the study by Hutchison (2015) assessment was made after exercise below & above the ventilatory threshold (VT) and in neither of these conditions was baseline affect measured hence the 4 missing values. 
+
+However all studies have a `affect_greatest_deviation` because this variable was calculated from the *first affect recording during exercise* if the baseline was not available. We will remove studies without a baseline affect score before analysis.
+
+```{r}
+#| label: EDA - Affect Change with Exercise
+data_in <- data_in %>% filter(!is.na(Affect_baseline))
+```
+
+One study (Kwan et al) recorded data at 96% VT... seems a bit arbitrary however Daniel Kinghorn confirmed this was not a typo (email 01/02/2023).
+
+Now we'll plot the `affect_greatest_deviation` value to get a sense of the effect of exercise on this variable. The `affect_greatest_deviation` is a change score. The literature recommends adjusting for baseline when change scores are being analysed (e.g. ). To adjust for baseline score in the plot we'll simply subtract baseline `Affect_baseline` from `affect_greatest_deviation`.  We'll also colour the points by the percent VT training was carried out at.
+
+```{r}
+#| label: Plot affect deviation
+# plot
+data_in %>% ggplot(aes(x = 1, y = Affect_greatest_deviation - Affect_baseline)) + geom_jitter(aes(colour = factor(Intensity_perc_of_VT)), size = 3, width = 0.1) +
+  scale_color_brewer(7, palette = 'Set1') +
+  stat_summary(fun = 'mean', fun.min = 'mean', fun.max= 'mean', geom = 'crossbar', width=0.35) +
+  xlim(0,2) + 
+  theme(axis.text.x = element_blank()) +
+      labs(title = 'Most Extreme Affect Change During Exercise\nRelative to Baseline',
+       x = '',
+       y = 'Greatest Deviation in Affect\n(adjusted for baseline affect)') +
+  guides(colour = guide_legend(title = "%VT for Exercise"))
+```
+
+The mean change here is negative indicating that on average affect change is negative with exercise. Notably the most extreme baseline controlled affect changes both occur at 80% of VT! There are seven studies that used exercise intensity above the ventilatory threshold (yellow and brown points). These points are predominantly below the mean line (all brown and 3/4 yellow) indicating that higher intensity exercise leads to reduced affect.
+
+## Assumption checking
+
+For the purposes of meta-analysis it's useful to assume that the outcome variable is generated by a process that gives rise to an approximately normal distribution. The best way to check for approximate normality is through plotting (see [here](https://allendowney.blogspot.com/2013/08/are-my-data-normal.html)). Allen Downey suggests that the right question to ask is not 'Are my data normally distributed?' but instead 'Is the normal distribution a good fit for my data?'. We can check that assumption with a plot. Allen Downey suggests using cumulative density rather than histograms for reasons outlined [here](https://docs.google.com/presentation/d/12FSJvTVNCGzB6gUlQKOrdfS9F6lYwfJtGgGUGZYV708/edit#slide=id.gf9b6fcf0_00).
+
+```{r}
+#| label: ECDF for data vs Normal CDF
+
+data_in %>% ggplot(aes(x = Affect_greatest_deviation)) +
+  stat_ecdf(geom = 'step', pad = FALSE, linewidth = 1.3) +
+  stat_function(fun = pnorm,
+                args = list(mean = mean(data_in$Affect_greatest_deviation, na.rm = TRUE), sd = sd(data_in$Affect_greatest_deviation, na.rm = TRUE)),
+                colour = 'cornflowerblue',
+                linewidth = 1.3)
+```
+
+Given the relative paucity of values we have the fit to a Normal distribution looks reasonable. There are some wayward points in the middle of the distribution. 
+We can also check a qqplot.
+
+```{r}
+#| label: QQ Plot
+data_in %>% ggplot(aes(sample = Affect_greatest_deviation)) +
+  geom_qq() + geom_qq_line()
+```
+
+Generally normality seems like a reasonable assumption here. The qqplot makes clear the extreme point is quite extreme for a Normal distribution. We can examine the effect of removing the extreme point later by re-running the analysis after dropping that point.
+
+### Affect Change vs Exercise Intensity
+
+We're interested in the relationship between exercise intensity and change in affect. Let's plot that and see what it looks like. This will help inform interpretations later on. Again we'll correct for baseline affect here by simple subtraction.
+
+```{r}
+#| label: Final affect vs exercise intensity
+
+# useful commentary on span
+# https://stackoverflow.com/questions/42338871/what-does-the-span-argument-control-in-geom-smooth
+
+data_in %>% ggplot(aes(Intensity_perc_of_VT, Affect_greatest_deviation - Affect_baseline)) +
+  geom_point() + 
+  geom_smooth(method = 'loess', span = 1, se = FALSE) +
+  labs(x='Percent of VT', y='Affect Greatest Change\n From Baseline')
+
+# baseline affect vs dev-baseline
+
+data_in %>% ggplot(aes(Affect_baseline, Affect_greatest_deviation - Affect_baseline)) +
+  geom_point() + 
+  geom_smooth(method = 'loess', span = 1, se = FALSE) +
+  labs(x='Baseline Affect', y='Affect Greatest Change\n From Baseline')
+
+
+# excluding extreme value affect_greatest_deviation = -2
+data_in %>% filter(Affect_greatest_deviation > -2) %>%
+  ggplot(aes(Intensity_perc_of_VT, Affect_greatest_deviation - Affect_baseline)) +
+  geom_point() + 
+  geom_smooth(method = 'loess', span = 1, se = FALSE) +
+  labs(x='Percent of VT', y='Affect Greatest Change\n From Baseline')
+
+data_in %>% filter(Affect_greatest_deviation > -2) %>% ggplot(aes(Affect_baseline, Affect_greatest_deviation)) +
+  geom_point() + 
+  geom_smooth(method = 'loess', span = 1, se = FALSE) +
+  labs(x='Baseline Affect', y='Affect Greatest Change\n From Baseline')
+```
+
+There's a pretty smooth effect here. Generally as exercise intensity goes up there's little change in affect until about 95-100% of ventilatory threshold. This suggests a nonlinear model would be useful for these data. This would also fit with the Dual-Mode Theory (DMT) which describes the predicted pattern of affective valence responses (pleasure vs. displeasure) across the three domains of exercise intensity (moderate, heavy, severe).
+
+![resources/DMM_Ekkekakis.jpg](The predicted pattern of affective valence responses (pleasure vs. displeasure) across the three domains of exercise intensity (moderate, heavy, severe) according to DMT).
+
+The exercise intensity levels used across the included trials range from 80% to 110%. It would be useful for setting up Bayesian priors (especially on a model intercept) if we re-scaled these exercise intensities to have a mean of zero. To help with later interpretation with regard to exercise intensity we'll center the data at 100% ventilatory threshold by subtracting 100 from each `perc_vt` value.
+
+```{r}
+#| label: Centre ex intensities
+
+# center data
+data_in <- data_in %>% 
+  mutate(Intensity_perc_of_VT = Intensity_perc_of_VT - 100)
+
+# plot
+data_in %>% ggplot(aes(Intensity_perc_of_VT, Affect_greatest_deviation)) +
+  geom_point() + 
+  geom_smooth(method = 'loess', se = TRUE) +
+  labs(x='Percent of VT', y='Affect Greatest Change\n From Baseline')
+# plot without extreme value
+data_in %>% 
+  filter(Affect_greatest_deviation > -2) %>%
+  ggplot(aes(Intensity_perc_of_VT, Affect_greatest_deviation)) +
+  geom_point() + 
+  geom_smooth(method = 'loess', se = TRUE) +
+  labs(x='Percent of VT', y='Affect Greatest Change\n From Baseline')
+
+```
+
+This plot makes suggests a change in affect as predicted. However there is still quite a lot of noise in the data and the extreme point at 100% VT (bottom right) pulls the line down quite a bit.
+
+This plot also suggests that a nonlinear model would be appropriate; we will however also compare the linear and nonlinear models.
+
+## Variables to include
+
+After discussion with NV, DK & RP on 1/5/23 it was decided that covariates in the meta-regression analyses should include:
+
+* Affect baseline (we need this to adjust change scores anyway)
+* %age female
+* Age
+* BMI
+* Baseline VO2 max
+
+## NEED THESE VARS
+
+@vickersStatisticsNotesAnalysing2001 as reference to justify ANCOVA model.
+
+## Meta-analysis
+
+In this section we will use frequentist and Bayesian methods to carry out a meta-analysis of `affect_greatest_deviation`. Meta-analysis aims to pool observed effect sizes into one overall (true) effect ($\mu$). Meta-analysis models are inherently multilevel or hierarchical. One widely used meta-analytic model incorporating the multilevel nature of the data is the Normal-Normal hierarchical model. On the first level we have data gathered from individual study participants. These data are usually only available as an effect size of some type (e.g. SMD statistic). We can denote these as $\hat{\theta_k}$. These estimates are drawn from study specific normal distributions:
+
+$$
+\hat{\theta_k} \sim N(\theta_k, \sigma^2_k)
+$$
+
+Each $\hat{\theta_k}$ is an *estimate* of the 'true' effect, $\theta_k$ from that study.
+
+The $\theta_k$ in turn are estimates of the true population effect, $\mu$. The $\theta_k$ are also sampled from a normal distribution:
+
+$$
+\theta_k \sim N(\mu, \tau^2)
+$$
+
+Here $\mu$ is the pooled effect we want to estimate and the variance, $\tau^2$ represents the between study variability or heterogeneity.
+
+This form of hierarchical model for meta-analysis is called the normal-normal hierarchical model (NNHM):
+
+$$
+\hat{\theta_k} \sim N(\theta_k, \sigma^2_k) \\
+\theta_k \sim N(\mu, \tau^2)
+$$
+
+The $\sigma^2_k$ in the first level model are known to us; they're the standard errors (or squared standard errors) from each study. If we consider that each $\hat{\theta_k}$ is a noisy estimate of $\mu$ then we can restate the whole model as:
+
+$$
+\theta_k \sim N(\mu, \sigma^2 + \tau^2)
+$$
+or
+$$
+\theta_k \sim N(\mu, \sqrt{\sigma^2 + \tau^2})
+$$
+
+if we want to work with the standard deviation instead of the variance.
+
+### Meta-regression with % VT
+
+<!-- https://cran.r-project.org/web/packages/bayesmeta/vignettes/RoeverFriede2022-UsingBayesmetaForMetaRegression.pdf -->
+
+<!-- https://discourse.mc-stan.org/t/pointers-for-a-novice-bayesian-random-effects-meta-analysis-meta-regression/22868/3 -->
+
+<!-- https://bookdown.org/ajkurz/Statistical_Rethinking_recoded/missing-data-and-other-opportunities.html#summary-bonus-meta-analysis -->
+
+<!-- Need to inclide baseline score as a covariate: https://training.cochrane.org/handbook/current/chapter-10#section-10-5-2 -->
+<!-- https://www.youtube.com/watch?v=G0xUT3yvvR0 -->
+
+In order to examine the effect of exercise intensity on affect we need to carry out a meta-regression. Meta-regression tries to explain study statistical heterogeneity in terms of study-level variables, summarising the information not as a single value (e.g. a mean) but as function @tiptonHistoryMetaregressionTechnical2019. Here we will use a linear model as our function. In the language of meta-analysis the covariates we include in meta-regression are called moderators.
+
+We are modeling `Affect_greatest_deviation` which is a change score. We shou;ld tehrefore adjust for baseline affect (`Affect_baseline`). This is simple in `metafor`. We supply the covariates to the `mods = ` argument and use a formula interface to add both covariates.
+
+We will first fit a meta-regression using the `metafor` package.
+
+```{r}
+#| label: Frequentist meta-regression
+
+# model adjusted for baseline affect using formula in `mods = ` argument
+freq_meta_regress <- rma(yi = Affect_greatest_deviation, 
+                         vi = SD_GD,
+                         mods = ~ Intensity_perc_of_VT + Affect_baseline + Perc_female + BMI + Age_year,
+                         data = data_in)
+
+summary(freq_meta_regress)
+# plot main var of interest
+regplot(freq_meta_regress, mod = 'Intensity_perc_of_VT', pi = FALSE)
+# affect baseline effect close to 'stat sig'
+regplot(freq_meta_regress, mod = 'Affect_baseline', pi = FALSE)
+# BMI stat sig
+regplot(freq_meta_regress, mod = 'BMI', pi = FALSE)
+```
+
+Here we see that the effect of `Intensity_perc_of_VT` is slightly negative. As `Intensity_perc_of_VT` rises the `Affect_grestest_deviation` reduces. The plot presents the relationship as a 'bubbleplot'. The linear model is shown with a 95% confidence interval for the line. Each study is represented as a circle with size proportional to the weight the study is given in the model (see `?regplot` for details).
+
+The effect of `Affect_baseline` is strongly positive but this is likely due to the outlying value. The `regplot` shows that this value drags the effect down at the left hand side of the plot. CHECK THIS LATER WITH ROBUST ANALYSIS
+
+Perhaps more notably here is the estimate for $\tau^2$. This is estimated at 0% but is given a standard deviation. This phenomena is addressed by @williamsBayesianMetaAnalysisWeakly2018 who use Bayesian methods to get around the finding the frequentist meta-analytic methods can lead to boundary estimates of exactly zero between study variance.
+
+### Bayesian meta-regression model
+
+Given the above we can begin the process of defining a Bayesian meta-analysis. We'll start with the simple model defined above where we examine the effect of `perc_vt` on `affect_greatest_deviation` across all the studies.
+
+The model here is a mixed effects model with:
+
+$$
+y_i \sim N(\theta_i, \sigma_i) \\
+\theta_i \sim N(x_i\beta_i, \tau)
+$$
+
+The above can be re-written as:
+
+$$
+y_i\sim N(x_i\beta_i, \tau + \sigma_i)
+$$
+
+where $\tau$ is a random effect describing the study specific variation from the mean of all studies and $\sigma_i$ is a random error term describing sampling variability.  Typically individual-level data is not known when meta-analyses or meta-regression are carried out. The sampling variability ($\sigma_i$) originates at a level below individual studies, but it cannot be estimated from the available aggregated data. Therefore $sigma_i$ is assumed to be known exactly by the study level standard errors.
+
+Our specific model is:
+
+$$
+affect\_greatest\_deviation_i \sim N(\beta_0 + \beta_1\times perc\_vt_i, \tau + \sigma_i)
+$$
+
+In a Bayesian analysis we have to put prior distributions on the quantities we are trying to estimate. We are trying to estimate:
+
+* $\beta_0$ - `affect_greatest_deviation` when `perc_vt` is 95% because of the rescaling we have done
+* $\beta$ coefficients; the effect of each covariate on `affect_greatest_deviation`
+* $\tau$ - the between study standard deviation
+
+### Setting priors
+
+We will use a normal prior for the intercept term, $\beta_0$ with a mean of 2 and a standard deviation of 2. This means there is a 95% probability that the intercept will be between 0 and 4 in `affect_greatest_deviation` measures. This seems suitably vague given the scale of the data.
+
+The slope is unlikely to be very steep and a-priori we might skeptically think that exercise intensity might increase or decrease `affect_greatest_deviation` when assessed across all studies. We will choose a normal distribution for the prior with a mean of 0 and a standard deviation of 1. This means there is a 95% probability a-priori that the slope coefficient is between 2 and -2. Again given the scale of the data this seems reasonable vague.
+
+A prior on $\tau$ is a harder. We know $\tau$ has to be positive so we need a distribution with support on $\mathbb{R}^+$ only. There could conceivably be quite a lot of between-study heterogeneity and so we also want a distribution that allows $\tau$ to be large if the data suggest that. In this example we'll use a half-Cauchy distribution parameterised as $HC(0,1)$. This is also suggested as a useful prior for $\tau$ by @williamsBayesianMetaAnalysisWeakly2018. What does prior mean for $\tau$?
+
+```{r}
+library(extraDistr)
+# if tau is 1
+1-phcauchy(1, 1, lower.tail = TRUE)
+# plot defined half cauchy
+x <- seq(1, 5, 0.01)
+y <- dhcauchy(x, 1)
+plot(x, y, type = 'l', 
+     xlab = expression(paste('Possible ', tau, ' values')),
+     ylab = 'Density')
+# plot shading
+x_coord <- c(1, seq(1, 2, 0.1), 2)
+y_coord <- c(0, dhcauchy(seq(1 ,2, 0.1), 1), 0)
+polygon(x_coord, y_coord, col = 'grey')
+```
+
+There's an a-priori 50% chance that $\tau$ is less than 2. This seems reasonable.
+
+```{r}
+#| label: Setting priors for meta-regression
+
+priors <- c(prior(normal(2,2), class = Intercept),
+                  prior(normal(0,2), class = b),
+            prior(cauchy(0,1), class = sd))
+```
+
+### Running the model
+
+With the priors set we can now use `brms` to run the Bayesian model. The `affect_greatest_deviation|se(SD_GD)` syntax here associates each effect size estimate to the standard error derived from the relevant study.
+
+```{r}
+brm_meta_regress <- brm(Affect_greatest_deviation|se(SD_GD) ~ 1 + 
+                          Intensity_perc_of_VT + 
+                          Affect_baseline + 
+                          Perc_female + 
+                          BMI + 
+                          Age_year + 
+                          (1|Author),
+             data = data_in, 
+             family = gaussian, 
+             prior = priors,
+             sample_prior = TRUE,
+             chains = 4,
+             iter = 5000,
+             warmup = 500, 
+             cores = 4,
+             seed = 7)
+# model summary
+print(brm_meta_regress, digits = 4)
+```
+
+### Results
+
+The intercept term is 6.262; when exercise intensity is at 95% of VT the mean `Affect_greatest_deviation` is 6.26 (??). 
+
+In the frequentist model the intercept was 4.3.
+
+The effect of `Intensity_perc_of_VT` on `Affect_greatest_deviation` is -0.013. As exercise intensity rises by one unit `Affect_greatest_deviation` goes down by 0.013 units. The frequentist result for this effect was -0.075 - this about x6 larger than the Bayesian estimate.
+
+The effect of `Affect_baseline` on `Affect_greatest_deviation` is 0.1. The frequentist estimate was 0.48 - these are quite different.
+
+The effect of `Perc_female` on `Affect_greatest_deviation` is 0.0057. The frequentist effect was 0.001.
+
+The effect of `BMI` in `Affect_greatest_deviation` is -0.1979. The frequentist estimate was -0.1979. Again quite different.
+
+Finally the effect of `Age_year` on `Affect_greatest_deviation` is 0.011 whilst the frequentist estimate was 0.079.
+
+Notably there is a non-zero estimate for $\tau$ here (`sd(Intercept)`) of around 0.4. This indicates that around 40% of the variance in the study can be attributed to between study heterogeneity. I think this makes more sense than 0!
+
+The diagnostic statistics from the Bayesian model (Rhat and Bulk & Tail ESS) both look good. We can check other diagnostics (trace plots) and the posterior distribution of the model terms by plotting.
+
+```{r}
+#| label: Diagnistic and estimate plots
+plot(brm_meta_regress, variable = '^b_', regex = TRUE)
+plot(brm_meta_regress, variable = 'sd_Author__Intercept')
+```
+
+These also look good. The traceplots have converged which is exactly what we'd look for.
+
+Finally we can plot the effect of `perc_vt` on `affect_greatest_deviation`. This is a bit more involved. Useful details are [here](https://discourse.mc-stan.org/t/geom-point-in-marginal-effects/8858/2).
+
+```{r}
+#| label: Ex intensity marginal plot
+eff <- 'BMI'
+
+p1 <- conditional_effects(brm_meta_regress, effects = eff)
+# have to put e.g. line_args in call to plot below
+plt <- plot(p1, line_args = list(colour = 'black'), plot = FALSE)[[1]] # get plot
+# add layer; .data[[eff]] selects column in eff string variable
+plt <- plt + geom_point(data = data_in, aes(.data[[eff]], Affect_greatest_deviation, size = 1/SD_GD), 
+                        colour = 'black',
+                        shape = 1,
+                        stroke = 1,
+                 inherit.aes = FALSE) +
+  labs(x = '% VT (centered at 95%)', y = 'Greatest deviation in affect\n from baseline') +
+  theme(legend.position = 'NULL')
+
+plt
+```
+
+This is pretty much identical to the frequentist plot generated by `metafor`.
+
+## Forest plots
+
+```{r}
+get_variables(brm_meta_regress)
+# https://github.com/mvuorre/brmstools
+
+# random effects
+rand_effs <- spread_draws(brm_meta_regress, r_Author[Author,term], b_Intercept) %>% 
+  mutate(b_Intercept = r_Author + b_Intercept) 
+# Average effect
+fixed_eff <- spread_draws(brm_meta_regress, b_Intercept) %>% 
+  mutate(study = "Average")
+
+# combine data frames
+all_effs <- bind_rows(rand_effs, fixed_eff) %>% 
+  ungroup() 
+
+# %>%
+#   # Ensure that Average effect is on the bottom of the forest plot
+#   mutate(study = fct_relevel(author, "Average"))
+
+all_effs_sum <- group_by(all_effs, Author) %>% 
+      mean_qi(b_Intercept)
+
+# plot density for each study intercept
+all_effs %>%   
+  ggplot(aes(b_Intercept, Author)) +
+  geom_density_ridges(
+    rel_min_height = 0.01, 
+    col = NA,
+    scale = 1) +
+  # add point interval 95% HDI from summary data
+  geom_pointinterval(
+    data = all_effs_sum, aes(xmin = .lower, xmax = .upper),
+    orientation = 'horizontal',
+    size = 1) +
+  # add useful labels
+  geom_text(
+    data = mutate_if(all_effs_sum, is.numeric, round, 2),
+    # Use glue package to combine strings
+    aes(label = glue::glue("{b_Intercept} [{.lower}, {.upper}]"), x = -3),
+    hjust = "inward"
+  )
+```
+
+## Nonlinear models
+
+```{r}
+# with metafor
+# use restricted cubic splines
+# https://www.metafor-project.org/doku.php/tips:non_linear_meta_regression
+library(mgcv)
+
+# make smooths; model matrix
+s_vt <- smoothCon(s(Intensity_perc_of_VT, bs="cr", k=3), data=data_in, absorb.cons=TRUE)[[1]]
+
+# use these model matrices in our meta-regression model
+freq_nonlinear_meta_regress <- rma(yi = Affect_greatest_deviation,  
+                                   sei = SD_GD, 
+                                   mods = ~ s_vt$X + 
+                                     Affect_baseline + 
+                                     Perc_female + 
+                                     Age_year +
+                                     BMI, 
+                                   data=data_in)
+
+summary(freq_nonlinear_meta_regress)
+# X1 and X2 are coefs on powers of Intensity... 
+# i.e. Intensity^2 & Intensity^3 I think
+# still have zero heterogeneity
+
+# make a plot for perc_vt
+# predic from smooth preds and model
+# range over which to predict
+xs <- seq(-15, 15, 0.1)
+
+# prediction range must have same name as predictor!! 
+# Intensity_perc_of_VT = xs
+s_vt_preds <- predict(freq_nonlinear_meta_regress,
+                    newmods = PredictMat(s_vt, data.frame(Intensity_perc_of_VT = xs)))
+
+# ?put in linear model??
+regplot(freq_meta_regress, mod = 2, pred = s_vt_preds, xvals = xs)
+```
+
+```{r}
+# with brms
+# default is thin plate splines
+# https://bookdown.org/content/4857/geocentric-models.html#summary-first-bonus-smooth-functions-with-brmss
+# k is basis complexity or 'maximum wigglyness'
+# number of small basis functions that make up the curve
+# https://www.youtube.com/watch?v=Ukfvd8akfco
+# 23 mins in
+# https://fromthebottomoftheheap.net/2018/04/21/fitting-gams-with-brms/
+# last site has useful tips
+
+get_prior(Affect_greatest_deviation|se(SD_GD) ~ 1 + 
+                          s(Intensity_perc_of_VT, k = 3) +
+                          (1|Author), data = data_in)
+
+# cubic regression spline (bs = 'cs')
+# For 4-knot models, they are recommended at the 5th, 35th, 65th, and 95th percentile (2). Schuster et al 2022
+brm_nonlinear_meta_regress <- brm(Affect_greatest_deviation|se(SD_GD) ~ 1 + s(Intensity_perc_of_VT, k = 3 , bs = 'cr') + 
+                                    Affect_baseline +
+                                    Perc_female +
+                                    Age_year +
+                                    BMI +
+                                    (1|Author), 
+                                  iter = 10000, 
+                                  data = data_in,
+                                  seed = 5,
+                                  control = list(adapt_delta = 0.99,
+                                                 stepsize = 0.05))
+
+print(brm_nonlinear_meta_regress, digits = 4)
+# where are the knots?
+# with(data_in, place.knots(perc_vt, 3))
+# min, mean, max
+# maybe a custom list of knot values?
+# -15, 12, 15? reflecting apparent change in
+# perc_vt at ~95% VT
+# see https://discourse.mc-stan.org/t/specifying-knot-positions-in-splines-in-brms/6395
+# and https://discourse.mc-stan.org/t/setting-custom-knots-with-a-b-spline-bs-bs/15380/5
+```
+
+Divergent transitions with default settings; decreased `stepsize` and increased `adapt_delta`. Still an few but only 5 out of 40k in total... looks good.
+
+```{r}
+get_variables(brm_nonlinear_meta_regress)
+p1 <- conditional_effects(brm_nonlinear_meta_regress, effects = 'Intensity_perc_of_VT')
+# have to put e.g. line_args in call to plot below
+plt <- plot(p1, line_args = list(colour = 'black'), plot = FALSE)[[1]] # get plot
+# add layer
+plt <- plt + geom_point(data = data_in, aes(Intensity_perc_of_VT, Affect_greatest_deviation, size = 1/SD_GD), 
+                        colour = 'black',
+                        shape = 1,
+                        stroke = 1,
+                 inherit.aes = FALSE) +
+  labs(x = '% VT (centered at 95%)', y = 'Greatest deviation in affect\n from baseline') +
+  theme(legend.position = 'NULL')
+
+plt
+```
+
+```{r}
+conditional_smooths(brm_nonlinear_meta_regress)
+```
+
+```{r}
+#| label: posterior predictions
+
+pred_at <- seq(-20, 10, 5)
+post_preds <- posterior_predict(brm_nonlinear_meta_regress, newdata = NULL, re_formula = ~(1|Author))
+```
+
+
+```{r}
+# compare models
+
+# It is recommended to set 'moment_match = TRUE' in order to perform moment matching for problematic observations. 
+brm_meta_regress <- add_criterion(brm_meta_regress, 'loo', moment_match = TRUE)
+
+
+brm_nonlinear_meta_regress <- add_criterion(brm_nonlinear_meta_regress, 'loo')
+
+
+loo::loo_compare(brm_meta_regress, brm_nonlinear_meta_regress, criterion = 'loo')
+```
+
+# EXTRA STUFF
+
+## RoBMA
+
+```{r}
+library(RoBMA)
+# same priors as above
+# doesn't do meta-regression I think
+
+robma_model <- RoBMA(y = data_in$affect_greatest_deviation,
+                     se = data_in$SD_GD)
+summary(robma_model)
+plot(robma_model)
+```
+
+### Frequentist analysis with `metafor`
+
+The `metafor` package @viechtbauerConductingMetaAnalysesMetafor2010a has functionality ofr frequentist meta-analysis.
+
+```{r}
+library(metafor)
+
+ # rma(yi = outcome , vi = variance, data = data) 
+metafor_test <- rma(yi = affect_greatest_deviation,
+                    vi = SD_GD^2,
+                    data = data_in)
+
+summary(metafor_test, digits = 3)
+```
+
+The estimated mean `affect_greatest_deviation` here is 2.3 across all studies. This is a population level effect. More notable is the estimate of between study heterogeneity ($\tau^2$). This is estimated at 0% but is given a standard deviation. This phenomena is addressed by @williamsBayesianMetaAnalysisWeakly2018 who use Bayesian methods to get around the finding the frequentist meta-analytic methods can lead to boundary estimates of exactly zero between study variance.
+
+### Bayesian meta-analysis
+
+Given the above we can begin the process of defining a Bayesian meta-analysis. We'll start small by initially modeling `affect_greatest_deviation` by `author` i.e. study only. Once we have that nailed we can add more terms.
+
+In a Bayesian analysis we have to put prior distributions on the quantities we are trying to estimate. We are trying to estimate:
+
+* $\mu$ - the 'true' effect
+* $\tau$ - the between study standard deviation
+
+### Setting priors
+
+In the current context $\mu$ is the population level `affect_greatest_deviation` . What might a prior for $\mu$ look like? In the current case effects could be either positive or negative and we're agnostic as to direction. Furthermore a value for `affect_greatest_deviation` >2 in absolute terms is unlikely so perhaps we can consider $\mu$ normally distributed around zero with a standard deviation of 1:
+
+$$
+\mu \sim N(0,1)
+$$
+
+This suggests that there's a 95% probability that $\mu$ falls between -2 & 2.
+
+A prior on $\tau$ is a harder. We know $\tau$ has to be positive so we need a distribution with support on $\mathbb{R}^+$ only. There could conceivably be quite a lot of between-study heterogeneity and so we also want a distribution that allows $\tau$ to be large if the data suggest that. In this example we'll use a half-Cauchy distribution parameterised as $HC(0,1)$. THis is also suggested as a useful prior for $\tau$ by @williamsBayesianMetaAnalysisWeakly2018. What does prior mean for $\tau$?
+
+```{r}
+library(extraDistr)
+# if tau is 1
+1-phcauchy(1, 1, lower.tail = TRUE)
+# plot defined half cauchy
+x <- seq(1, 5, 0.01)
+y <- dhcauchy(x, 1)
+plot(x, y, type = 'l', 
+     xlab = expression(paste('Possible ', tau, ' values')),
+     ylab = 'Density')
+# plot shading
+x_coord <- c(1, seq(1, 2, 0.1), 2)
+y_coord <- c(0, dhcauchy(seq(1 ,2, 0.1), 1), 0)
+polygon(x_coord, y_coord, col = 'grey')
+```
+
+There's an a-priori 50% chance that $\tau$ is less than 2. This seems reasonable.
+
+### Running the model
+
+We will fit this model with the ```brms``` package. This package allows us to fit rather complex Bayesian models with the [Stan](https://mc-stan.org/) probabilistic programming language using close to native R modeling syntax; we don't have to know how to write Stan code to fit Bayesian models. 
+
+The first step is to define the priors as above. We can do this using the ```prior()``` function from ```brms```. We pass the ```prior()``` function the parameterised distribution we want to use and the parameter we want that prior to refer to. In this case we have no $\beta$ coefficients in our model and we only need priors for the intercept and the standard deviation of that intercept.
+
+```{r}
+priors <- c(prior(normal(0,1), class = Intercept),
+            prior(cauchy(0,1), class = sd))
+
+# inv gamma prior as per metaBMA
+# ig_prior <- c(prior(normal(0,1), class=Intercept),
+#          prior(inv_gamma(1,0.15), class=sd))
+```
+
+Next we have to define the model. The ```brms``` package uses the standard R modeling syntax which makes it easy to use for those familiar with R. The ```brm()``` function takes the model definition, converts it to Stan code and the model is then run. 
+
+The ```brm()``` function can take many arguments. The formula for the model is specified in the ```formula = ``` argument. In most meta-analyses we are interested in predicting the mean of a set of observed study specific means or effect sizes. These are in effect intercept only models - there's no independent predictor. In R syntax the intercept is designated by 1 in the model (``` es ~ 1```). We want to weight each observed effect size by the variability of that effect size; higher variability means less confidence and that effect size would be given less weight in the model. In the ```brm()``` function we can achieve this using ```es|se(se) ~ 1```. Use of the pipe (```|```) and the ```se()``` function in the left hand side of the model formula groups the observed ```se``` with the relevant observed effect size, ```es```.
+
+Finally we have to tell ```brm()``` we want to run a random effects model and that we want to estimate a separate intercept for each study as well as the overall intercept. We do this on the right hand side of the formula by adding ```+ (1 | study)``` to the formula.
+
+```{r, eval = FALSE}
+es | se(se) ~ 1 + (1 |study)
+```
+
+We also pass in the distribution we would like to use for the response variable (```family = gaussian```), the priors we defined above, the number MCMC chains, the number of iterations for each MCMC chain & number of warmup samples for each chain. Finally we tell ```brm()``` we want Stan to use 4 cores on our PC for faster sampling.
+
+```{r}
+# plot sampled priors
+brm_r_eff_model <- brm(affect_greatest_deviation|se(SD_GD) ~ 1 + (1|author),
+             data = data_in, 
+             family = gaussian, 
+             prior = priors,
+             sample_prior = TRUE,
+             chains = 4,
+             iter = 3000,
+             warmup = 500, 
+             cores = 4,
+             seed = 1234)
+# model summary
+summary(brm_r_eff_model)
+```
+
+There are several sections to the model summary but for meta-analysis we don't have to concern ourselves with all of them. The top section tells us about the model we have fit. The `Group-Level Effects:` section tells us about the variability between studies. This is $\tau$ in the model specification above. Here the estimated standard deviation is ~0.5. 
+
+`Population-Level Effects:` section tell us the estimated mean `affect_greatest_deviation` from the data; here that is 1.99. The lower & upper 95% CI here are credible intervals. We can say that (given the priors and the data) the mean `affect_greatest_deviation` lies between 1.24 to 2.63 with 95% probability.
+
+The `Family Specific Parameters:` section at the bottom is not estimated because we supplied standard deviation ($\sigma$) estimates for each study mean when we carried out the meta-analysis & these are taken as fixed i.e. we 'know' them.
+
+Each of teh parameter estimates are accompanied by some diagnostic statistics that tell us something about the MCMC process that underpins the estimates. The `Rhat` values are 1 and the `Bulk_ESS` and `Tail_ESS` are both high. So we can be (somewhat) satisfied the MCMC process has run as it should.
+
+We can plot the posterior distribution of `affect_greatest_deviation` after extracting the MCMC chain draws.
+
+```{r}
+# extract draws
+post_draws <- as.data.frame(brm_r_eff_model, variable = 'b_Intercept')
+
+# plot estimated mean change
+ggplot(post_draws, aes(b_Intercept)) + stat_halfeye() +
+  labs(x = "Estimated Affect Greatest Deviation", y = '') + theme(axis.text = element_text(size = 16), axis.title = element_text(size = 18))
+```
+
+The point shows the median of the posterior distribution, the thick lines are a 50% highest density interval (HDI) and the thin lines are a 95% HDI. These tell us where the value of model estimated `affect_greatest_change` lies with the stated probability level. Note these are not meant for frequency probability interpretations!
+
+As we noted above the estimated effect here is about 2. That's reassuring because it suggests that our model reflects the data which also had a mean of about 2.
+
+The `brms` package comes with a handy `hypothesis()` function which will calculate the posterior probability for a particular hypothesis. Below we examine the posterior probability that the estimated mean `affect_greatest_deviaiton` is greater than 0.
+
+```{r}
+#| label: Post prob for effect > 0
+# intercept < 0?
+hyp <- hypothesis(brm_r_eff_model, 'Intercept > 0')
+hyp
+plot(hyp)
+```
+
+In this case the estimated mean is almost certainly greater than zero!
+
+### A Forest plot
+
+
+FOREST PLOT SEE https://mvuorre.github.io/posts/2016-09-29-bayesian-meta-analysis/
+
+```{r}
+# Study-specific effects; deviations + average
+study_effs <- spread_draws(brm_r_eff_model, r_author[author,term], b_Intercept) %>% 
+  mutate(b_Intercept = r_author + b_Intercept) 
+
+# average effect over all studies
+ave_eff <- spread_draws(brm_r_eff_model, b_Intercept) %>% 
+  mutate(author = "Average")
+
+# combine dataframes
+out_all <- bind_rows(study_effs, ave_eff) %>% 
+  ungroup() 
+
+# %>%
+#     # Ensure that Average effect is on the bottom of the forest plot
+#   mutate(study = fct_relevel(author, "Average")) 
+
+# %>% 
+  # # tidybayes garbles names so fix here
+  # mutate(study = str_replace_all(author, "\\.", " "))
+
+# Data frame of summary numbers for plot
+out_all_sum <- group_by(out_all, author) %>% 
+  mean_qi(b_Intercept)
+
+# NEEDS A BIT OF WORK YET
+
+# draw plot
+out_all %>%   
+  ggplot(aes(b_Intercept, author)) +
+  # Zero!
+  geom_vline(xintercept = 0, size = .25, lty = 2) +
+  stat_halfeye(.width = c(.8, .95), fill = "dodgerblue") +
+  # Add text labels
+  geom_text(data = mutate_if(out_all_sum, is.numeric, round, 2),
+    aes(label = str_glue("{b_Intercept} [{.lower}, {.upper}]"), x = -3),
+    hjust = "inward") +
+  # Observed as empty points
+  geom_point(data = data_in %>% mutate(author = str_replace_all(author, "\\.", " ")), 
+    aes(x = affect_greatest_deviation), position = position_nudge(y = -.2), shape = 1)
+
+# Jones.(Male) & Jones (Male)!
+```
+
+
+## Heterogeneity
+
+https://www.metafor-project.org/doku.php/tips:i2_multilevel_multivariate
+
+Study heterogeneity quantifies how variable results are between included studies. One statistic to quantify this is $I^2$. This is calculated as @vonhippelHeterogeneityStatisticI22015:
+
+$$
+I^2 = \frac{\tau^2}{\tau^2 + E(\sigma^2)}
+$$
+
+where $E(\sigma^2)$ is the mean of the observed within study variances which we get by taking the square root of the variance mean. 
+
+$$
+E(\sigma^2) = \sqrt{\frac{1}{i}\Sigma_1^i(\sigma_i^2)}
+$$
+
+```{r}
+mean_sigma <- with(data_in, sqrt(mean(SD_GD^2)))
+```
+
+We can calculate a distribution for $I^2$ using the posterior distribution for $\tau$ and subtracting the mean standard error we calculated above.
+
+```{r}
+# get_variables(brm_r_eff_model)
+post_tau <- as.data.frame(brm_r_eff_model, variable = 'sd_author__Intercept')
+i_sq_post <- post_tau^2/(post_tau^2 + mean_sigma^2)
+# colnames(i_sq_post) <- 'isq_samples'
+
+# plot the dist
+ggplot(i_sq_post, aes(sd_author__Intercept)) + stat_halfeye() + 
+  labs(x = bquote(I^2), y = '') +
+  theme(axis.text = element_text(size = 16), axis.title = element_text(size = 18))
+
+# summary
+i_sq_post %>% summarise(mn = mean(sd_author__Intercept), q2.5 = quantile(sd_author__Intercept, 0.025), q97.5 = quantile(sd_author__Intercept, 0.975))
+```
+
+Here the $I^2$ statistic has a mean of 0.07 (7%) with a 95% credible interval of pretty much zero to about 0.31 (31%).
+
+AT SECTION ## Calculating group specific weighted means IN brms.Rmd file
