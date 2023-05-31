@@ -405,7 +405,9 @@ brm_meta_regress <- brm(Affect_greatest_deviation|se(SD_GD) ~ 1 +
              iter = 5000,
              warmup = 500, 
              cores = 4,
-             seed = 7)
+             seed = 7,
+             # save_pars for later loo-cv model comparison
+             save_pars = save_pars(all = TRUE))
 # model summary
 print(brm_meta_regress, digits = 4)
 ```
@@ -546,6 +548,8 @@ s_vt_preds <- predict(freq_nonlinear_meta_regress,
 regplot(freq_meta_regress, mod = 2, pred = s_vt_preds, xvals = xs)
 ```
 
+## Bayesian nonlinear model
+
 ```{r}
 # with brms
 # default is thin plate splines
@@ -573,7 +577,8 @@ brm_nonlinear_meta_regress <- brm(Affect_greatest_deviation|se(SD_GD) ~ 1 + s(In
                                   data = data_in,
                                   seed = 5,
                                   control = list(adapt_delta = 0.99,
-                                                 stepsize = 0.05))
+                                                 stepsize = 0.05),
+                                  save_pars = save_pars(all = TRUE))
 
 print(brm_nonlinear_meta_regress, digits = 4)
 # where are the knots?
@@ -618,20 +623,21 @@ post_preds <- posterior_predict(brm_nonlinear_meta_regress, newdata = NULL, re_f
 
 ## Model comparison
 
-<!-- The XXX model of affect response to HIIT predicts a non-linear response and so it is useful to compare the linear and nonlinear models we have estimated. The R package `loo` @vehtariPracticalBayesianModel2017 implements a fast approximation to leave-one-out cross validation (LOO-CV) for model comparison. The code below carries out the model comparison. -->
+The XXX model of affect response to HIIT predicts a non-linear response and so it is useful to compare the linear and nonlinear models we have estimated. The R package `loo` @vehtariPracticalBayesianModel2017 implements a fast approximation to leave-one-out cross validation (LOO-CV) for model comparison. The code below carries out the model comparison.
 
 ```{r}
 # compare models
+# takes a while!
 
 # It is recommended to set 'moment_match = TRUE' in order to perform moment matching for problematic observations. 
 brm_meta_regress <- add_criterion(brm_meta_regress, 'loo', moment_match = TRUE)
+brm_nonlinear_meta_regress <- add_criterion(brm_nonlinear_meta_regress, 'loo', moment_match = TRUE)
 
-
-brm_nonlinear_meta_regress <- add_criterion(brm_nonlinear_meta_regress, 'loo')
-
-
+# carry out psis-loo comparison
 loo::loo_compare(brm_meta_regress, brm_nonlinear_meta_regress, criterion = 'loo')
 ```
+
+This analysis indicates there is no difference between these models.
 
 # EXTRA STUFF
 
