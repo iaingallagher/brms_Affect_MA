@@ -618,7 +618,7 @@ post_preds <- posterior_predict(brm_nonlinear_meta_regress, newdata = NULL, re_f
 
 ## Model comparison
 
-The XXX model of affect response to HIIT predicts a non-linear response and so it is useful to compare the linear and nonlinear models we have estimated. The R package `loo` @vehtariPracticalBayesianModel2017 implements a fast approximation to leave-one-out cross validation (LOO-CV) for model comparison. The code below carries out the model comparison.
+<!-- The XXX model of affect response to HIIT predicts a non-linear response and so it is useful to compare the linear and nonlinear models we have estimated. The R package `loo` @vehtariPracticalBayesianModel2017 implements a fast approximation to leave-one-out cross validation (LOO-CV) for model comparison. The code below carries out the model comparison. -->
 
 ```{r}
 # compare models
